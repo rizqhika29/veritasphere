@@ -1,0 +1,26 @@
+# Node / Next
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# env — .env.production (public contract + RPC) is committed for Vercel;
+# local overrides stay untracked
+frontend/.env
+.env.local
+.env*.local
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# GenLayer (regenerable)
+artifacts/
+
+# misc
+*.log
+.DS_Store
+Thumbs.db

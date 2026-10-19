@@ -5,10 +5,7 @@ import { Input, Card, Badge } from "@/components/ui/card";
 import { GhostButton } from "@/components/ui/button";
 import { isConfigured, readAll, readTopics, type EntryCard } from "@/lib/genlayer";
 
-const MOCK: EntryCard[] = [
-  { id: 1, topic: "crypto", title: "What is Bitcoin?", status: "ACCEPTED", score: 9 },
-  { id: 2, topic: "ai", title: "GenLayer ideas", status: "PENDING", score: 0 },
-];
+const CONFIGURED = isConfigured();
 
 export default function Explore() {
   const [q, setQ] = useState("");
@@ -20,7 +17,7 @@ export default function Explore() {
 
   useEffect(() => {
     (async () => {
-      if (!isConfigured()) return;
+      if (!CONFIGURED) return;
       try {
         const [all, tps] = await Promise.all([readAll(1, 50), readTopics()]);
         setLive(all.entries);
@@ -31,7 +28,7 @@ export default function Explore() {
   }, []);
 
   const list = useMemo(() => {
-    const src = live ?? MOCK;
+    const src = live ?? [];
     return src.filter((e) => {
       if (topic && e.topic !== topic) return false;
       if (!q) return true;
@@ -46,7 +43,9 @@ export default function Explore() {
         <div>
           <h1 className="text-4xl font-light italic">Explore base</h1>
           <p className="text-white/60 text-sm">
-            {live ? `Live · ${total} total entries on-chain.` : "Mock preview — set NEXT_PUBLIC_CONTRACT_ADDRESS for live."}
+            {CONFIGURED
+              ? live ? `Live · ${total} total entries on-chain.` : "Loading on-chain entries..."
+              : "Set NEXT_PUBLIC_CONTRACT_ADDRESS (frontend/.env) untuk live reads."}
           </p>
         </div>
         <Link href="/submit"><GhostButton>Submit contribution →</GhostButton></Link>
@@ -61,7 +60,8 @@ export default function Explore() {
           ))}
         </div>
       )}
-      {list.length === 0 && <p className="text-white/50 text-sm">No entries match.</p>}
+      {live === null && CONFIGURED && !err && <p className="text-white/50 text-sm">Loading on-chain entries...</p>}
+      {live !== null && list.length === 0 && <p className="text-white/50 text-sm">No entries match.</p>}
       <div className="grid md:grid-cols-2 gap-4">
         {list.map((e) => (
           <Card key={e.id}>

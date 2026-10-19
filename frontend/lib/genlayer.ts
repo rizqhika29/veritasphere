@@ -237,12 +237,3 @@ export async function validateContributionLive(provider: unknown, walletAddress:
 export async function cancelPendingLive(provider: unknown, walletAddress: string, id: number) {
   return writeWithWallet(provider, walletAddress, "cancel_pending", [id]);
 }
-
-export async function mockValidationResult(id: number): Promise<ValidationResult> {
-  return {
-    id, status: "PENDING", ai_score: 0, ai_summary: "", ai_reason: "",
-    accepted: false, threshold: 7, source_url: "https://en.wikipedia.org/wiki/Bitcoin",
-    topic: "crypto", title: "What is Bitcoin?", contributor: "0x...",
-    evidence_snippet: "", settled_reward: "0",
-  };
-}

@@ -18,7 +18,7 @@ export default function Submit() {
     if (!f.title.trim()) { setMsg("title required"); return; }
     if (!f.source_url.startsWith("http")) { setMsg("source_url must start with http(s)://"); return; }
     if (f.summary.length < 20) { setMsg("Summary min 20 chars"); return; }
-    if (!isConfigured()) { setMsg("Set NEXT_PUBLIC_CONTRACT_ADDRESS in .env, then retry. Demo id=1."); router.push("/entry/1"); return; }
+    if (!isConfigured()) { setMsg("Set NEXT_PUBLIC_CONTRACT_ADDRESS di frontend/.env, lalu retry."); return; }
     const { address, provider } = getActiveWallet();
     if (!address || !provider) { setMsg("Connect wallet dulu via popup kanan atas (pilih MetaMask / Rabby)."); return; }
     setBusy(true);

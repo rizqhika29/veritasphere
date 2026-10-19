@@ -213,6 +213,13 @@ class Veritasphere(gl.Contract):
     def _normalize_topic(self, topic: str) -> str:
         return topic.strip().lower()
 
+    def _as_address(self, v) -> Address:
+        # 40-hex args arrive from the ABI as a native Address even when the
+        # parameter is declared str (CLI/contract callers send address type).
+        # Address(Address) raises "cannot convert 'Address' object to bytes",
+        # so wrap ONLY str/bytes inputs and pass Address through untouched.
+        return v if isinstance(v, Address) else Address(str(v))
+
     def _require_entry(self, entry_id: u32) -> Entry:
         if entry_id not in self.entries:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Entry {entry_id} not found")
@@ -481,7 +488,7 @@ Return JSON only: {{"summary": "...", "score": 0-10, "is_relevant": true/false, 
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Only owner")
         if amount == u256(0):
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Amount must be > 0")
-        _Recipient(Address(to_address)).emit_transfer(value=amount)
+        _Recipient(self._as_address(to_address)).emit_transfer(value=amount)
 
     # ---------- views ----------
 
@@ -535,7 +542,7 @@ Return JSON only: {{"summary": "...", "score": 0-10, "is_relevant": true/false, 
 
     @gl.public.view
     def get_contributor_stats(self, contributor: str) -> dict:
-        addr = Address(contributor)
+        addr = self._as_address(contributor)
         return {
             "submitted": int(self.submitted_count.get(addr, u32(0))),
             "accepted": int(self.accepted_count.get(addr, u32(0))),

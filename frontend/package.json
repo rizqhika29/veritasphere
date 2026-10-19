@@ -10,6 +10,7 @@
     "lint:genvm": "node scripts/genvm-lint.mjs",
     "test:integration": "node --import tsx --test \"tests/integration/*.test.ts\"",
     "test:studionet": "node scripts/studionet-tests.mjs",
+    "test:money": "node scripts/money-flow-tests.mjs",
     "test:all": "npm run lint:genvm && npm run test:integration"
   },
   "dependencies": {

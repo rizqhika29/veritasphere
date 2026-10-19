@@ -2,15 +2,15 @@
 
 > **Submit a source, let AI validators verify it.** Users post topic + source-URL summaries; the Intelligent Contract fetches the page itself, runs an LLM adjudication bound to that evidence, and AI validators re-verify independently before consensus settles a GEN reward to the contributor.
 
-[![GenLayer](https://img.shields.io/badge/GenLayer-Studionet-F5A524)](https://studio.genlayer.com/) [![Contract](https://img.shields.io/badge/contract-0x90Ec…c7e-2DD4BF)](https://explorer-studio.genlayer.com/contracts/0x90Ec630FB36f612d874aFe7b4cc9C6910DF12c7e)
+[![GenLayer](https://img.shields.io/badge/GenLayer-Studionet-F5A524)](https://studio.genlayer.com/) [![Contract](https://img.shields.io/badge/contract-0x8E4E…3b0A-2DD4BF)](https://explorer-studio.genlayer.com/contracts/0x8E4E6168028BCaCDB9a885Be4B014380371A3b0A)
 
 ## 🔴 Live on Studionet
 
 | | |
 |---|---|
-| **Contract** | [`0x90Ec630FB36f612d874aFe7b4cc9C6910DF12c7e`](https://explorer-studio.genlayer.com/contracts/0x90Ec630FB36f612d874aFe7b4cc9C6910DF12c7e) |
+| **Contract** | [`0x8E4E6168028BCaCDB9a885Be4B014380371A3b0A`](https://explorer-studio.genlayer.com/contracts/0x8E4E6168028BCaCDB9a885Be4B014380371A3b0A) |
 | **Network** | GenLayer Studionet (chain `61999`) — gasless, 60 req/min |
-| **Test record** | 18/18 direct · 15/15 frontend-binding · 59/60 live E2E + adversarial (2026-10-17) |
+| **Test record** | 18/18 direct · 15/15 frontend-binding · 25/25 money-flow (2026-10-19) · 59/60 live E2E + adversarial (2026-10-17) |
 
 ## ❓ Why
 
@@ -70,7 +70,8 @@ npm run dev                    # http://localhost:3000 — live contract
 |---|---|
 | `npm run lint:genvm` | contract passes the GenVM linter (encoding-safe on Windows) |
 | `npm run test:integration` | **real** frontend functions against the **deployed** contract — typed UI shapes, schema parity, write happy-path + duplicate-URL rejection, rpc-guard units (15 tests) |
-| `npm run test:studionet` | E2E + adversarial suite via CLI (needs `npm i -g genlayer`, active account with GEN): settle pays exactly 0.1 GEN, guards, escape hatches |
+| `npm run test:money` | **real GEN balance deltas** for every pay path: gasless writes, transfer-in, `fund_pool` msg.value via genlayer-js, settle pays contributor exactly the reward, `withdraw` guards + exact movement (waits out the eventually-consistent balance layer; 25 tests) |
+| `npm run test:studionet` | E2E + adversarial suite via CLI (needs `npm i -g genlayer`, active account with GEN): settle pays exactly 0.1 GEN, guards, escape hatches. Expects a **fresh** contract (asserts `total_entries == 0`) |
 | `npm run test:all` | lint:genvm + integration |
 | `gltest tests/integration --network studionet` | full-consensus pytest suite (real web + LLM; uses the same direct-mode harness) |
 
@@ -80,7 +81,7 @@ npm run dev                    # http://localhost:3000 — live contract
 2. Env is baked in via [`frontend/.env.production`](frontend/.env.production) — no dashboard vars needed:
 
    ```ini
-   NEXT_PUBLIC_CONTRACT_ADDRESS=0x90Ec630FB36f612d874aFe7b4cc9C6910DF12c7e
+   NEXT_PUBLIC_CONTRACT_ADDRESS=0x8E4E6168028BCaCDB9a885Be4B014380371A3b0A
    NEXT_PUBLIC_RPC_URL=https://studio.genlayer.com/api
    NEXT_PUBLIC_CHAIN=studionet
    ```

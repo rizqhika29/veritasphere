@@ -10,13 +10,6 @@ import {
 } from "@/lib/genlayer";
 import { getActiveWallet } from "@/components/WalletConnect";
 
-const DEMO: ValidationResult = {
-  id: 1, status: "ACCEPTED", ai_score: 9, ai_summary: "Bitcoin is a decentralized digital currency... (demo)",
-  ai_reason: "reputable source, faithful summary (demo)", accepted: true, threshold: 7,
-  source_url: "https://en.wikipedia.org/wiki/Bitcoin", topic: "crypto", title: "What is Bitcoin?",
-  contributor: "0x...", evidence_snippet: "Bitcoin is a decentralized...", settled_reward: "0",
-};
-
 export default function Entry({ params }: { params: { id: string } }) {
   const id = Number(params.id);
   const [v, setV] = useState<ValidationResult | null>(null);
@@ -73,7 +66,7 @@ export default function Entry({ params }: { params: { id: string } }) {
   }
 
   const live = isConfigured();
-  const d = v ?? (!live ? DEMO : null);
+  const d = v;
   const tone = d?.status === "ACCEPTED" ? "green" : d?.status === "PENDING" ? "yellow" : d?.status === "REJECTED" ? "red" : "slate";
 
   return (
@@ -83,12 +76,12 @@ export default function Entry({ params }: { params: { id: string } }) {
         <GhostButton onClick={load}>↻ Refresh</GhostButton>
       </div>
       <p className="text-white/60 text-sm">
-        {!live && "Demo — set NEXT_PUBLIC_CONTRACT_ADDRESS for live get_validation_result."}
+        {!live && "Set NEXT_PUBLIC_CONTRACT_ADDRESS (frontend/.env) untuk live get_validation_result."}
         {live && d?.status === "PENDING" && "Live · PENDING — polling tiap 8 detik sampai consensus settle."}
         {live && d && d.status !== "PENDING" && "Live from get_validation_result."}
       </p>
       {err && <p className="text-red-300 text-sm break-all">{err}</p>}
-      {!d && !err && <p className="text-white/50 text-sm">Loading...</p>}
+      {!d && !err && live && <p className="text-white/50 text-sm">Loading...</p>}
 
       {d && (
         <>

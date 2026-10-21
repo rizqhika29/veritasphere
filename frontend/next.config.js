@@ -1,3 +1,20 @@
 /** @type {import('next').NextConfig} */
-const nextConfig = { reactStrictMode: true };
+
+// NEXT_PUBLIC_* are inlined at build time. Prefer process.env (Vercel dashboard
+// or frontend/.env.production loaded by @next/env); fall back to the audited
+// deploy values so a missing/empty dashboard var can never ship an unconfigured
+// build (steward finding: "CONTRACT NOT CONFIGURED" after deploy).
+const FALLBACKS = {
+  NEXT_PUBLIC_CONTRACT_ADDRESS: "0x8E4E6168028BCaCDB9a885Be4B014380371A3b0A",
+  NEXT_PUBLIC_RPC_URL: "https://studio.genlayer.com/api",
+  NEXT_PUBLIC_CHAIN: "studionet",
+};
+
+const nextConfig = {
+  reactStrictMode: true,
+  env: Object.fromEntries(
+    Object.entries(FALLBACKS).map(([key, fallback]) => [key, process.env[key] || fallback]),
+  ),
+};
+
 module.exports = nextConfig;

@@ -1,5 +1,5 @@
 """
-Veritasphere integration tests — full consensus (leader + validators).
+Veritasphere v2 integration tests — full consensus (leader + validators).
 Run: gltest tests/integration/test_veritasphere_integration.py -v -s --network studionet
 Requires real web + LLM, so use GOOD sources only for accuracy.
 """
@@ -14,7 +14,7 @@ GOOD_DRAFT = "Bitcoin is a decentralized digital currency invented by Satoshi Na
 
 def test_full_accept_flow():
     factory = get_contract_factory("Veritasphere")
-    contract = factory.deploy(args=[0])
+    contract = factory.deploy(args=[0])  # reward 0 -> no pool funding needed
 
     tx = contract.submit_contribution(
         args=["crypto", GOOD_TITLE, GOOD_URL, GOOD_DRAFT]
@@ -26,8 +26,9 @@ def test_full_accept_flow():
     assert entry["status"] == "PENDING"
     assert entry["source_url"] == GOOD_URL
 
-    pending = contract.get_pending_entries().call()
-    assert len(pending) >= 1
+    pending = contract.get_pending_entries(args=[0, 20]).call()
+    assert pending["total"] >= 1
+    assert any(e["id"] == 1 for e in pending["entries"])
 
     # full consensus: leader fetches GOOD_URL + LLM scores, validators re-fetch + compare
     tx2 = contract.validate_contribution(args=[1]).transact()
@@ -42,16 +43,18 @@ def test_full_accept_flow():
     assert v["source_url"] == GOOD_URL
     print(f"CONSENSUS RESULT: {v['status']} score={v['ai_score']} reason={v['ai_reason']}")
 
-    # frontend list views
+    # frontend list views (v2: offset+limit, dict {total, entries})
     all_entries = contract.get_all_entries(args=[1, 10]).call()
     assert all_entries["total"] >= 1
 
     topics = contract.get_topics().call()
     assert "crypto" in topics
 
-    by_topic = contract.get_accepted_entries(args=["crypto", 10]).call()
+    by_topic = contract.get_accepted_entries(args=["crypto", 0, 10]).call()
     # if accepted, must appear here; if rejected (low score), list may be empty — both valid
-    # but consensus must be deterministic: re-read must match
+    if v["status"] == "ACCEPTED":
+        assert any(e["id"] == 1 for e in by_topic["entries"])
+    # consensus must be deterministic: re-read must match
     v2 = contract.get_validation_result(args=[1]).call()
     assert v2 == v
 
@@ -70,8 +73,10 @@ def test_reject_flow_does_not_break_reads():
 
     v = contract.get_validation_result(args=[1]).call()
     assert v["status"] in ("ACCEPTED", "REJECTED")
-    # leaderboard + stats must always be readable
-    lb = contract.get_leaderboard(args=[10]).call()
-    assert isinstance(lb, list)
+    # leaderboard + stats must always be readable (v2 signatures)
+    lb = contract.get_leaderboard(args=[0, 10]).call()
+    assert "entries" in lb and "total" in lb
     stats = contract.get_stats().call()
     assert stats["total_entries"] >= 1
+    assert "available_balance" in stats
+    assert "pending_count" in stats

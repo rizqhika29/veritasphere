@@ -11,13 +11,14 @@ export default function Validate() {
   const [pend, setPend] = useState<PendingCard[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [justifications, setJustifications] = useState<Record<number, string>>({});
 
   async function load() {
     if (!isConfigured()) { setLog("Set NEXT_PUBLIC_CONTRACT_ADDRESS to load live pending queue."); setLoaded(true); return; }
     try {
       const p = await readPending();
-      setPend(p);
-      setLog(p.length ? `Found ${p.length} pending entr${p.length === 1 ? "y" : "ies"}.` : "No pending entries.");
+      setPend(p.entries);
+      setLog(p.entries.length ? `Found ${p.entries.length} of ${p.total} pending entr${p.total === 1 ? "y" : "ies"}.` : "No pending entries.");
     } catch (e) { setLog(`Load failed: ${(e as Error).message}`); }
     finally { setLoaded(true); }
   }
@@ -30,7 +31,8 @@ export default function Validate() {
     try {
       const r = kind === "validate"
         ? await validateContributionLive(provider, address, id)
-        : await cancelPendingLive(provider, address, id);
+        // owner must supply a justification; contributor (non-owner) may pass ""
+        : await cancelPendingLive(provider, address, id, justifications[id] ?? "");
       setLog(`${kind}(${id}) → ok=${r.ok} ${r.status} tx=${r.txId}. Opening result...`);
       await load();
     } catch (e) { setLog(`${kind} failed: ${(e as Error).message}`); }
@@ -65,6 +67,12 @@ export default function Validate() {
           <h3 className="mt-2">{it.title}</h3>
           <p className="text-white/50 text-xs break-all mt-1">{it.source_url}</p>
           <p className="text-white/40 text-xs break-all">contributor {it.contributor}</p>
+          <input
+            className="mt-3 w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-xs text-white/80 placeholder:text-white/30"
+            placeholder="Justification for cancel (required if you are the contract owner)"
+            value={justifications[it.id] ?? ""}
+            onChange={(e) => setJustifications((j) => ({ ...j, [it.id]: e.target.value }))}
+          />
           <div className="flex gap-3 mt-4">
             <Button disabled={busy} onClick={() => act("validate", it.id)}>{busy ? "Working..." : "Validate (AI consensus)"}</Button>
             <GhostButton disabled={busy} onClick={() => act("cancel", it.id)}>Cancel</GhostButton>

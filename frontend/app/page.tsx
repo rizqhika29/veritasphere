@@ -51,8 +51,9 @@ export default function Home() {
           {stats ? (
             <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
               <div><p className="text-3xl font-light">{stats.total_entries}</p><p className="text-white/50 text-xs mt-1">entries</p></div>
-              <div><p className="text-3xl font-light">{stats.topics.length}</p><p className="text-white/50 text-xs mt-1">topics</p></div>
-              <div className="col-span-2"><p className="text-3xl font-light break-all">{stats.reward_amount}</p><p className="text-white/50 text-xs mt-1">reward per accepted entry</p></div>
+              <div><p className="text-3xl font-light">{stats.pending_count}</p><p className="text-white/50 text-xs mt-1">pending</p></div>
+              <div><p className="text-3xl font-light break-all">{stats.reward_amount}</p><p className="text-white/50 text-xs mt-1">reward per accepted entry (wei)</p></div>
+              <div><p className="text-3xl font-light break-all">{stats.available_balance}</p><p className="text-white/50 text-xs mt-1">available pool (wei, {stats.reserved_balance} reserved)</p></div>
             </div>
           ) : (
             <p className="mt-3 text-white/60 text-sm">Set <code>NEXT_PUBLIC_CONTRACT_ADDRESS</code> di <code>frontend/.env</code> (dan <code>NEXT_PUBLIC_CHAIN</code>) untuk live stats + submit/validate.</p>

@@ -5,7 +5,7 @@ import { Card, Badge } from "@/components/ui/card";
 import { Button, GhostButton } from "@/components/ui/button";
 import {
   isConfigured, readStats, readValidationResult,
-  validateContributionLive, cancelPendingLive,
+  validateContributionLive, cancelPendingLive, appealCancellationLive,
   type ValidationResult,
 } from "@/lib/genlayer";
 import { getActiveWallet } from "@/components/WalletConnect";
@@ -16,6 +16,7 @@ export default function Entry({ params }: { params: { id: string } }) {
   const [err, setErr] = useState("");
   const [log, setLog] = useState("");
   const [busy, setBusy] = useState(false);
+  const [justification, setJustification] = useState("");
 
   const load = useCallback(async () => {
     if (!isConfigured()) return;
@@ -51,14 +52,18 @@ export default function Entry({ params }: { params: { id: string } }) {
     return () => clearInterval(t);
   }, [v?.status, load]);
 
-  async function act(kind: "validate" | "cancel") {
+  async function act(kind: "validate" | "cancel" | "appeal") {
     const { address, provider } = getActiveWallet();
     if (!address || !provider) { setLog("Connect wallet dulu via popup kanan atas."); return; }
     setBusy(true);
     try {
       const r = kind === "validate"
         ? await validateContributionLive(provider, address, id)
-        : await cancelPendingLive(provider, address, id);
+        : kind === "cancel"
+          // owner must supply a justification; contributor (non-owner) may pass ""
+          ? await cancelPendingLive(provider, address, id, justification)
+          // appeal requires a recorded reason (min 10 chars) from the contributor
+          : await appealCancellationLive(provider, address, id, justification);
       setLog(`${kind}(${id}) → ok=${r.ok} ${r.status} tx=${r.txId}`);
       await load();
     } catch (e) { setLog(`${kind} failed: ${(e as Error).message}`); }
@@ -96,9 +101,31 @@ export default function Entry({ params }: { params: { id: string } }) {
             <p className="text-white/60 text-sm break-all">Contributor: {d.contributor}</p>
 
             {d.status === "PENDING" && live && (
-              <div className="flex gap-3 mt-4">
-                <Button disabled={busy} onClick={() => act("validate")}>{busy ? "Working..." : "Validate (AI consensus)"}</Button>
-                <GhostButton disabled={busy} onClick={() => act("cancel")}>Cancel</GhostButton>
+              <div className="mt-4 space-y-3">
+                <input
+                  className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-xs text-white/80 placeholder:text-white/30"
+                  placeholder="Justification for cancel (required if you are the contract owner)"
+                  value={justification}
+                  onChange={(e) => setJustification(e.target.value)}
+                />
+                <div className="flex gap-3">
+                  <Button disabled={busy} onClick={() => act("validate")}>{busy ? "Working..." : "Validate (AI consensus)"}</Button>
+                  <GhostButton disabled={busy} onClick={() => act("cancel")}>Cancel</GhostButton>
+                </div>
+              </div>
+            )}
+            {d.status === "CANCELLED" && live && (
+              <div className="mt-4 space-y-3">
+                <input
+                  className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-xs text-white/80 placeholder:text-white/30"
+                  placeholder="Appeal reason (min 10 chars, recorded on-chain)"
+                  value={justification}
+                  onChange={(e) => setJustification(e.target.value)}
+                  disabled={d.appeal_count > 0}
+                />
+                <GhostButton disabled={busy || d.appeal_count > 0} onClick={() => act("appeal")}>
+                  {busy ? "Working..." : d.appeal_count > 0 ? "Appeal already used" : "Appeal cancellation (re-enter queue)"}
+                </GhostButton>
               </div>
             )}
             {log && <p className="text-cyan-300 text-xs break-all mt-3">{log}</p>}
@@ -107,6 +134,10 @@ export default function Entry({ params }: { params: { id: string } }) {
               <p><span className="text-white/50">AI summary:</span> {d.ai_summary || <span className="text-white/30">— (belum divalidasi)</span>}</p>
               <p><span className="text-white/50">AI reason (display-only):</span> {d.ai_reason || <span className="text-white/30">—</span>}</p>
               <p><span className="text-white/50">Evidence snippet:</span> {d.evidence_snippet || <span className="text-white/30">—</span>}</p>
+              {d.evidence_hash && (
+                <p className="break-all"><span className="text-white/50">Evidence commitment:</span> {d.evidence_hash} <span className="text-white/30">({d.evidence_len} chars{d.evidence_truncated ? ", truncated" : ""})</span></p>
+              )}
+              <p><span className="text-white/50">Committed reward (wei):</span> {d.committed_reward}</p>
               <p><span className="text-white/50">Settled reward:</span> {d.settled_reward}</p>
             </div>
           </Card>

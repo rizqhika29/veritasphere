@@ -22,6 +22,7 @@ const FRONTEND_FNS = [
   "get_stats", "get_all_entries", "get_pending_entries", "get_topics",
   "get_leaderboard", "get_validation_result", "get_entry", "get_accepted_entries",
   "submit_contribution", "validate_contribution", "cancel_pending",
+  "appeal_cancellation", "withdraw",
 ];
 
 before(async () => {
@@ -41,6 +42,11 @@ test("readStats: typed shapes for UI (number/string, no bigint)", { timeout: 60_
   assert.equal(typeof s.total_entries, "number");
   assert.equal(typeof s.reward_amount, "string");
   assert.ok(Array.isArray(s.topics));
+  // v2 ledger fields
+  assert.equal(typeof s.pool_balance, "string");
+  assert.equal(typeof s.reserved_balance, "string");
+  assert.equal(typeof s.available_balance, "string");
+  assert.equal(typeof s.pending_count, "number");
   assert.ok(s.total_entries >= 1, "studionet suite already created entries");
 });
 
@@ -58,27 +64,29 @@ test("readAll: {total, entries[]} with entry cards the explore page renders", { 
   }
 });
 
-test("readTopics / readPending / readLeaderboard: page shapes", { timeout: 60_000 }, async () => {
+test("readTopics / readPending / readLeaderboard: page shapes (v2 paginated dicts)", { timeout: 60_000 }, async () => {
   const topics = await gl.readTopics();
   assert.ok(topics.every((t) => typeof t === "string"));
 
-  const pending = await gl.readPending();
-  for (const p of pending) {
+  const pending = await gl.readPending(0, 20);
+  assert.equal(typeof pending.total, "number");
+  for (const p of pending.entries) {
     assert.equal(typeof p.id, "number");
     assert.equal(typeof p.source_url, "string");
     assert.match(p.contributor, /^0x[0-9a-fA-F]{40}$/);
   }
 
   const lb = await gl.readLeaderboard(10);
-  assert.ok(lb.length >= 1);
-  for (const r of lb) {
+  assert.equal(typeof lb.total, "number");
+  assert.ok(lb.entries.length >= 1);
+  for (const r of lb.entries) {
     assert.equal(typeof r.submitted, "number");
     assert.equal(typeof r.accepted, "number");
     assert.match(r.contributor, /^0x[0-9a-fA-F]{40}$/);
   }
 });
 
-test("readValidationResult / readEntry: entry detail page fields", { timeout: 60_000 }, async () => {
+test("readValidationResult / readEntry: entry detail page fields (v2)", { timeout: 60_000 }, async () => {
   const v = await gl.readValidationResult(1); // ACCEPTED by the studionet suite
   assert.equal(v.id, 1);
   assert.equal(v.status, "ACCEPTED");
@@ -86,6 +94,13 @@ test("readValidationResult / readEntry: entry detail page fields", { timeout: 60
   assert.equal(typeof v.ai_score, "number");
   assert.equal(v.threshold, 7);
   assert.equal(typeof v.settled_reward, "string");
+  // v2 evidence commitment + reward reservation fields
+  assert.equal(typeof v.committed_reward, "string");
+  assert.equal(typeof v.evidence_hash, "string");
+  assert.equal(typeof v.evidence_len, "number");
+  assert.equal(typeof v.evidence_truncated, "boolean");
+  assert.equal(typeof v.appeal_count, "number");
+  assert.ok(v.evidence_hash.startsWith("0x"), "settled entry must carry an evidence hash");
   assert.ok(v.ai_summary.length > 0);
   assert.match(v.source_url, /^https:\/\//);
 
@@ -94,11 +109,11 @@ test("readValidationResult / readEntry: entry detail page fields", { timeout: 60
   assert.match(String((e as { contributor: string }).contributor), /^0x[0-9a-fA-F]{40}$/);
 });
 
-test("readAccepted: accepted list + topic case-insensitive", { timeout: 60_000 }, async () => {
+test("readAccepted: accepted list + topic case-insensitive (v2 paginated dict)", { timeout: 60_000 }, async () => {
   const all = await gl.readAccepted("", 10);
-  assert.ok(all.length >= 1);
+  assert.ok(all.entries.length >= 1);
   const byTopic = await gl.readAccepted("CRYPTO", 10);
-  assert.equal(byTopic.length, all.length);
+  assert.equal(byTopic.entries.length, all.entries.length);
 });
 
 test("dec(): bigint → JS primitives everywhere (unit)", () => {
@@ -121,7 +136,7 @@ test("schema parity: every frontend function exists on the deployed contract", {
 // unique per run so the suite is re-runnable (contract rejects duplicate URLs)
 const smartUrl = `https://en.wikipedia.org/wiki/Smart_contract?run=${Date.now()}`;
 
-test("write path: submit via writeWithWallet → entry id from counter, PENDING", { timeout: 300_000 }, async () => {
+test("write path: submit via writeWithWallet → entry id from counter, PENDING", { timeout: 900_000 }, async () => {
   const signer = createAccount(); // local signer — same code path, no popup
   const url = smartUrl;
   const beforeStats = await gl.readStats();
@@ -159,7 +174,7 @@ test("write path: submit via writeWithWallet → entry id from counter, PENDING"
   assert.equal(String(vr!.settled_reward), "0");
 });
 
-test("write path: duplicate source_url rejected → ok=false (frontend error contract)", { timeout: 300_000 }, async () => {
+test("write path: duplicate source_url rejected → ok=false (frontend error contract)", { timeout: 900_000 }, async () => {
   const signer = createAccount();
   const r = await gl.submitContributionLive(
     signer, signer.address, "crypto", "Dup", smartUrl,

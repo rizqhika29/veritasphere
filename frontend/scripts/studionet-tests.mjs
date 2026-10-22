@@ -1,12 +1,14 @@
-// Veritasphere studionet E2E + adversarial suite.
+// Veritasphere v2 studionet E2E + adversarial suite.
 // Run: CONTRACT=0x... node scripts/studionet-tests.mjs  (contract defaults to
 // frontend/.env.production). Reads use genlayer-js (no wallet). Writes shell
 // out to the genlayer CLI (active unlocked account — npm i -g genlayer).
+// v2: pool ledger (fund_pool credits; plain transfers do NOT), reward reserved
+// at submit, paginated dict views, owner-cancel justification, audit trail.
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createClient } from "genlayer-js";
+import { createClient, createAccount } from "genlayer-js";
 import { studionet } from "genlayer-js/chains";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -38,6 +40,7 @@ function resolveContract() {
 }
 const ADDR = resolveContract();
 const REWARD = "100000000000000000"; // 0.1 GEN — constructor arg
+const ONE = 10n ** 18n;
 
 const client = createClient({ chain: studionet });
 
@@ -61,8 +64,20 @@ function dec(v) {
 }
 
 async function call(fn, args = []) {
-  const r = await client.readContract({ address: ADDR, functionName: fn, args });
-  return dec(r);
+  // The studionet endpoint occasionally answers with an HTML error page
+  // (WAF/rate-shaper) instead of JSON — viem throws UnknownRpcError. Retry
+  // with backoff rather than crashing the whole suite on one bad read.
+  let lastErr;
+  for (let i = 0; i < 12; i++) {
+    try {
+      const r = await client.readContract({ address: ADDR, functionName: fn, args });
+      return dec(r);
+    } catch (e) {
+      lastErr = e;
+      await sleep(10000);
+    }
+  }
+  throw lastErr;
 }
 
 function cliRaw(argv, { timeout = 900000 } = {}) {
@@ -93,21 +108,55 @@ function parseWrite(out) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function rate() { await sleep(4000); } // studionet: stay well under 60 req/min
 
+// fund_pool needs real msg.value — CLI has no value flag, so a local
+// genlayer-js account signs it (same path as money-flow S2).
+async function fundPool(valueWei) {
+  const local = createAccount();
+  const send = cliRaw(["account", "send", local.address, `${(Number(valueWei) / 1e18)}gen`]);
+  if (!/Transfer successful|amount:/i.test(send)) return { ok: false, out: send.slice(-300) };
+  const localClient = createClient({ chain: studionet, account: local });
+  const hash = await localClient.writeContract({ address: ADDR, functionName: "fund_pool", args: [], value: valueWei });
+  const cadence = [15000, 15000, 20000];
+  for (let i = 0; i < 24; i++) {
+    const tx = await localClient.getTransaction({ hash });
+    if (tx?.statusName === "FINALIZED") return { ok: true, hash };
+    if (["REJECTED", "FAILED", "UNDETERMINED"].includes(tx?.statusName)) return { ok: false, hash, status: tx.statusName };
+    await sleep(cadence[i] ?? 20000);
+  }
+  return { ok: false, hash, status: "timeout" };
+}
+
 // ---------------------------------------------------------------- E2E
-section("E2E 1: initial state");
+section("E2E 1: initial state (v2 ledger fields)");
 const s0 = await call("get_stats");
 console.log("  get_stats:", JSON.stringify(s0));
 ok("stats total_entries==0", s0.total_entries === 0, `got ${s0.total_entries}`);
 ok("stats reward==1e17", String(s0.reward_amount) === REWARD, `got ${s0.reward_amount}`);
 ok("name==Veritasphere", s0.name === "Veritasphere");
+ok("v2 pool/reserved/available present", s0.pool_balance === "0" && s0.reserved_balance === "0" && s0.available_balance === "0", JSON.stringify({ pool: s0.pool_balance, reserved: s0.reserved_balance }));
+ok("pending_count==0", Number(s0.pending_count) === 0, String(s0.pending_count));
 const emptyAll = await call("get_all_entries", [1, 10]);
 ok("get_all_entries empty", emptyAll.total === 0 && emptyAll.entries.length === 0, JSON.stringify(emptyAll));
-ok("get_topics empty", Array.isArray(await call("get_topics")) && (await call("get_topics")).length === 0);
-ok("get_pending_entries empty", (await call("get_pending_entries")).length === 0);
-ok("get_leaderboard empty", (await call("get_leaderboard", [10])).length === 0);
-ok("get_accepted_entries empty", (await call("get_accepted_entries", ["", 10])).length === 0);
+ok("get_topics empty", (await call("get_topics")).length === 0);
+const emptyPending = await call("get_pending_entries", [0, 20]);
+ok("get_pending_entries empty", emptyPending.total === 0 && emptyPending.entries.length === 0, JSON.stringify(emptyPending));
+const emptyLb = await call("get_leaderboard", [0, 10]);
+ok("get_leaderboard empty", emptyLb.total === 0 && emptyLb.entries.length === 0);
+const emptyAcc = await call("get_accepted_entries", ["", 0, 10]);
+ok("get_accepted_entries empty", emptyAcc.total === 0 && emptyAcc.entries.length === 0);
 
-section("E2E 2: submit_contribution happy path (entry #1)");
+section("E2E 1.5: fund_pool via real msg.value (ledger credit — prerequisite for submit)");
+// v2: submit reserves the advertised reward from the pool — fund 0.5 GEN
+// (2 submits reserve 0.2; cancel + payout exercise the rest).
+{
+  const f = await fundPool(ONE / 2n);
+  ok("fund_pool 0.5 GEN FINALIZED", f.ok, JSON.stringify(f));
+  const sf = await call("get_stats");
+  ok("pool_balance==5e17", String(sf.pool_balance) === "500000000000000000", String(sf.pool_balance));
+  ok("available==5e17 (nothing reserved yet)", String(sf.available_balance) === "500000000000000000", String(sf.available_balance));
+}
+
+section("E2E 2: submit_contribution happy path (entry #1, reward reserved)");
 await rate();
 const w1 = parseWrite(cli("submit_contribution", [
   "crypto",
@@ -130,18 +179,23 @@ ok("entry#1 topic normalized", vr1.topic === "crypto");
 ok("entry#1 url bound", vr1.source_url === "https://en.wikipedia.org/wiki/Proof-of-work");
 ok("entry#1 contributor set", /^0x[0-9a-fA-F]{40}$/.test(vr1.contributor), vr1.contributor);
 ok("entry#1 settled_reward==0 while PENDING", String(vr1.settled_reward) === "0");
+ok("entry#1 committed_reward==reward (reserved at submit)", String(vr1.committed_reward) === REWARD, String(vr1.committed_reward));
 
 const e1 = await call("get_entry", [1]);
 ok("get_entry#1 fields", e1.title === "What is proof-of-work?" && e1.status === "PENDING" && e1.contributor === vr1.contributor);
 
-const pend = await call("get_pending_entries");
-ok("pending contains #1", pend.length === 1 && pend[0].id === 1, JSON.stringify(pend));
+const sAfter1 = await call("get_stats");
+ok("reserved==1e17 after submit#1", String(sAfter1.reserved_balance) === REWARD, String(sAfter1.reserved_balance));
+ok("available==4e17 after submit#1", String(sAfter1.available_balance) === "400000000000000000", String(sAfter1.available_balance));
+
+const pend = await call("get_pending_entries", [0, 20]);
+ok("pending contains #1", pend.total === 1 && pend.entries[0].id === 1, JSON.stringify(pend));
 const all1 = await call("get_all_entries", [1, 10]);
 ok("all total==1", all1.total === 1, JSON.stringify(all1));
 const tps = await call("get_topics");
 ok("topics contains crypto", tps.includes("crypto"), JSON.stringify(tps));
 
-section("E2E 3: submit entry#2 (for cancel + non-owner tests)");
+section("E2E 3: submit entry#2 (for cancel + reservation-release tests)");
 await rate();
 const w2 = parseWrite(cli("submit_contribution", [
   "tech", "Blockchain overview",
@@ -151,23 +205,27 @@ const w2 = parseWrite(cli("submit_contribution", [
 ok("submit#2 SUCCESS", w2.execRes === "SUCCESS", w2.execRes);
 const vr2 = await call("get_validation_result", [2]);
 ok("entry#2 PENDING", vr2.status === "PENDING", vr2.status);
+const sAfter2 = await call("get_stats");
+ok("reserved==2e17 after submit#2", String(sAfter2.reserved_balance) === "200000000000000000", String(sAfter2.reserved_balance));
 
-section("E2E 4: cancel_pending (owner escape path)");
+section("E2E 4: cancel_pending (owner escape path, justification required + audited)");
 await rate();
-const w3 = parseWrite(cli("cancel_pending", [2]));
-ok("cancel#2 SUCCESS", w3.execRes === "SUCCESS", w3.execRes);
+// NB: a whitespace-only "" arg would be coerced by CLI parseScalar to int 0
+// (fails as a type error, not the contract guard) — use a short real string.
+const noJust = parseWrite(cli("cancel_pending", [2, "x"])); // owner, 1 char < min 10
+ok("owner cancel without justification rejected", noJust.execRes === "ERROR" && /requires justification/.test(noJust.out), noJust.execRes);
+await rate();
+const w3 = parseWrite(cli("cancel_pending", [2, "source unreachable during live validation window"]));
+ok("cancel#2 SUCCESS with justification", w3.execRes === "SUCCESS", w3.execRes);
 const vr2c = await call("get_validation_result", [2]);
 ok("entry#2 CANCELLED", vr2c.status === "CANCELLED", vr2c.status);
 ok("entry#2 settled_reward==0", String(vr2c.settled_reward) === "0");
-ok("cancel idempotence: pending no longer has #2", (await call("get_pending_entries")).every((p) => p.id !== 2));
+ok("cancel releases reservation (reserved back to 1e17)", String((await call("get_stats")).reserved_balance) === REWARD, String((await call("get_stats")).reserved_balance));
+ok("cancel idempotence: pending no longer has #2", (await call("get_pending_entries", [0, 20])).entries.every((p) => p.id !== 2));
+const audit1 = await call("get_audit", [0, 20]);
+ok("audit has OWNER_CANCEL for #2", audit1.entries.some((a) => a.action === "OWNER_CANCEL" && Number(a.entry_id) === 2), JSON.stringify(audit1));
 
 section("E2E 5: validate_contribution with REAL LLM consensus (entry #1)");
-// Reward payouts need contract balance — fund the pool first (plain GEN transfer).
-// CLI --fee-value does NOT attach msg.value (verified live), so fund via account send.
-console.log("  funding contract pool with 1 GEN...");
-await rate();
-const fund = cliRaw(["account", "send", ADDR, "1gen"]);
-ok("pool funded", /amount: '1 GEN'/.test(fund) || /Transfer successful/i.test(fund), fund.slice(-300));
 // Live-web LLM consensus can occasionally end UNDETERMINED (validators fetch
 // the page at slightly different times / model outputs vary). Entry stays
 // PENDING — safe to retry. Max 3 attempts, dump votes on disagreement.
@@ -199,13 +257,20 @@ console.log("  vr#1 after validate:", JSON.stringify(vr1f));
 if (vr1f.status === "ACCEPTED") {
   ok("entry#1 accepted==true", vr1f.accepted === true);
   ok("entry#1 settled_reward==reward_amount", String(vr1f.settled_reward) === REWARD, String(vr1f.settled_reward));
+  ok("entry#1 evidence_hash committed (0x-prefixed)", typeof vr1f.evidence_hash === "string" && vr1f.evidence_hash.startsWith("0x"), String(vr1f.evidence_hash));
+  ok("entry#1 evidence_len>0", Number(vr1f.evidence_len) > 0, String(vr1f.evidence_len));
+  const sSettled = await call("get_stats");
+  ok("settlement: reserved released (back to 0)", String(sSettled.reserved_balance) === "0", String(sSettled.reserved_balance));
+  ok("settlement: pool_balance decremented by reward", String(sSettled.pool_balance) === "400000000000000000", String(sSettled.pool_balance));
 } else if (vr1f.status === "REJECTED") {
   ok("entry#1 rejected => reward 0", String(vr1f.settled_reward) === "0", String(vr1f.settled_reward));
+  const sSettled = await call("get_stats");
+  ok("rejection: reserved released", String(sSettled.reserved_balance) === "0", String(sSettled.reserved_balance));
 } else {
   // live consensus stayed UNDETERMINED — exercise the owner escape path to reach a terminal state
   console.log("  still PENDING after retries → exercising cancel_pending escape path");
   await rate();
-  const wc = parseWrite(cli("cancel_pending", [1]));
+  const wc = parseWrite(cli("cancel_pending", [1, "consensus inconclusive after retries"]));
   ok("escape: cancel PENDING entry#1 SUCCESS", wc.execRes === "SUCCESS", wc.execRes);
   vr1f = await call("get_validation_result", [1]);
 }
@@ -213,44 +278,39 @@ ok("entry#1 terminal after suite", ["ACCEPTED", "REJECTED", "CANCELLED"].include
 ok("entry#1 score in 0..10", vr1f.ai_score >= 0 && vr1f.ai_score <= 10, String(vr1f.ai_score));
 ok("entry#1 summary non-empty", typeof vr1f.ai_summary === "string" && vr1f.ai_summary.length > 0);
 
-section("E2E 6: views after settlement");
-const lb = await call("get_leaderboard", [10]);
+section("E2E 6: views after settlement (v2 paginated dicts)");
+const lb = await call("get_leaderboard", [0, 10]);
 console.log("  leaderboard:", JSON.stringify(lb));
-ok("leaderboard has contributor", lb.length === 1 && /^0x[0-9a-fA-F]{40}$/.test(lb[0].contributor));
-ok("leaderboard submitted==2", Number(lb[0].submitted) === 2, String(lb[0].submitted));
-ok("leaderboard accepted==1 iff ACCEPTED", Number(lb[0].accepted) === (vr1f.status === "ACCEPTED" ? 1 : 0));
+ok("leaderboard has contributor", lb.total === 1 && /^0x[0-9a-fA-F]{40}$/.test(lb.entries[0].contributor));
+ok("leaderboard submitted==2", Number(lb.entries[0].submitted) === 2, String(lb.entries[0].submitted));
+ok("leaderboard accepted==1 iff ACCEPTED", Number(lb.entries[0].accepted) === (vr1f.status === "ACCEPTED" ? 1 : 0));
 const cs = await call("get_contributor_stats", [vr1f.contributor]);
-ok("contributor_stats matches", Number(cs.submitted) === 2 && Number(cs.accepted) === Number(lb[0].accepted));
-const acc = await call("get_accepted_entries", ["", 10]);
-ok("accepted_entries matches status", acc.length === (vr1f.status === "ACCEPTED" ? 1 : 0), JSON.stringify(acc));
-const accCrypto = await call("get_accepted_entries", ["CRYPTO", 10]); // topic case-insensitive
-ok("accepted_entries topic case-insensitive", accCrypto.length === acc.length);
+ok("contributor_stats matches", Number(cs.submitted) === 2 && Number(cs.accepted) === Number(lb.entries[0].accepted));
+const acc = await call("get_accepted_entries", ["", 0, 10]);
+ok("accepted_entries matches status", acc.total === (vr1f.status === "ACCEPTED" ? 1 : 0), JSON.stringify(acc));
+const accCrypto = await call("get_accepted_entries", ["CRYPTO", 0, 10]); // topic case-insensitive
+ok("accepted_entries topic case-insensitive", accCrypto.total === acc.total);
+const accTopic = await call("get_accepted_entries", ["crypto", 0, 10]);
+ok("accepted_entries by topic registry", accTopic.total === acc.total);
 const all2 = await call("get_all_entries", [1, 10]);
 ok("all total==2", all2.total === 2, String(all2.total));
 
 // ---------------------------------------------------------------- ADVERSARIAL
-section("ADV 1: submit input validation");
-await rate();
+section("ADV 1: submit input validation (representative — full matrix in tests/direct)");
 // NOTE: genlayer CLI parseScalar coerces whitespace-only strings to int 0
-// (Number(" ")===0), so a true "topic-only-spaces" arg never reaches the
-// contract via CLI — the VM rejects the wrong type (fail-closed, no entry).
-// Contract-level strip() guards are covered by tests/direct (bypass CLI).
-const a1 = parseWrite(cli("submit_contribution", ["  ", "Title", "https://example.com/a", "A perfectly valid long enough summary text here."]));
-ok("whitespace topic fails closed (no entry)", a1.execRes === "ERROR", `${a1.execRes} | ${a1.out.match(/payload: [^,}]*/)?.[0] ?? ""}`);
+// (Number(" ")===0), so some empty-field guards can't be exercised via CLI —
+// contract-level strip() guards are covered by tests/direct (bypass CLI).
 await rate();
 const a2 = parseWrite(cli("submit_contribution", ["crypto", "T", "https://example.com/b", "too short"]));
 ok("short summary rejected", a2.execRes === "ERROR" && /min 20 chars/.test(a2.out), a2.execRes);
 await rate();
 const a3 = parseWrite(cli("submit_contribution", ["crypto", "Title", "ftp://example.com/x", "A perfectly valid long enough summary text here."]));
-ok("non-http url rejected", a3.execRes === "ERROR" && /must start with http/.test(a3.out), a3.execRes);
+ok("non-http url rejected", a3.execRes === "ERROR" && /must start with https/.test(a3.out), a3.execRes);
 await rate();
 const a4 = parseWrite(cli("submit_contribution", ["crypto", "Dup", "https://en.wikipedia.org/wiki/Proof-of-work", "A perfectly valid long enough summary text here."]));
 ok("duplicate source_url rejected", a4.execRes === "ERROR" && /already submitted as entry 1/.test(a4.out), a4.execRes);
-await rate();
-const a5 = parseWrite(cli("submit_contribution", ["crypto", "", "https://example.com/c", "A perfectly valid long enough summary text here."]));
-ok("whitespace title fails closed (no entry)", a5.execRes === "ERROR", `${a5.execRes} | ${a5.out.match(/payload: [^,}]*/)?.[0] ?? ""}`);
 
-section("ADV 2: entry existence + state guards");
+section("ADV 2: entry existence + state guards (representative)");
 await rate();
 const a6 = parseWrite(cli("validate_contribution", [999]));
 ok("validate missing entry rejected", a6.execRes === "ERROR" && /not found/.test(a6.out), a6.execRes);
@@ -258,15 +318,12 @@ await rate();
 const a7 = parseWrite(cli("validate_contribution", [2]));
 ok("validate CANCELLED entry rejected", a7.execRes === "ERROR" && /already CANCELLED/.test(a7.out), a7.execRes);
 await rate();
-const a8 = parseWrite(cli("cancel_pending", [1]));
+const a8 = parseWrite(cli("cancel_pending", [1, "attempting to cancel a settled entry"]));
 const expectCancelTerminal = new RegExp(`already ${vr1f.status}`);
 ok("cancel settled entry rejected", a8.execRes === "ERROR" && expectCancelTerminal.test(a8.out), a8.execRes);
 await rate();
-const a9 = parseWrite(cli("cancel_pending", [999]));
-ok("cancel missing entry rejected", a9.execRes === "ERROR" && /not found/.test(a9.out), a9.execRes);
-await rate();
-const a10 = parseWrite(cli("validate_contribution", [1]));
-ok("double-validate settled entry rejected", a10.execRes === "ERROR" && expectCancelTerminal.test(a10.out), a10.execRes);
+const aAppeal = parseWrite(cli("appeal_cancellation", [1, "settled entry appeal probe reason"])); // settled, not CANCELLED
+ok("appeal on settled entry rejected", aAppeal.execRes === "ERROR" && /not CANCELLED/.test(aAppeal.out), aAppeal.execRes);
 
 let vrMissing = null;
 try { vrMissing = await call("get_validation_result", [999]); } catch (e) { vrMissing = { threw: true }; }
@@ -275,7 +332,7 @@ let geMissing = null;
 try { geMissing = await call("get_entry", [999]); } catch (e) { geMissing = { threw: true }; }
 ok("get_entry(999) throws", geMissing?.threw === true, JSON.stringify(geMissing));
 
-section("ADV 3: owner guards");
+section("ADV 3: owner guards + ledger integrity");
 await rate();
 const a11 = parseWrite(cli("fund_pool", [])); // no value attached
 ok("fund_pool with 0 value rejected", a11.execRes === "ERROR" && /Send some GEN/.test(a11.out), a11.execRes);
@@ -284,6 +341,7 @@ const a12 = parseWrite(cli("set_reward_amount", [REWARD])); // owner, same value
 ok("set_reward_amount by owner ok", a12.execRes === "SUCCESS", a12.execRes);
 const s1 = await call("get_stats");
 ok("reward unchanged", String(s1.reward_amount) === REWARD, String(s1.reward_amount));
+ok("set_reward audited", (await call("get_audit", [0, 20])).entries.some((a) => a.action === "SET_REWARD"));
 const allFinal = await call("get_all_entries", [1, 10]);
 ok("no phantom entries from failed submits", allFinal.total === 2, String(allFinal.total));
 

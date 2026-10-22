@@ -50,6 +50,8 @@ export type ValidationResult = {
   ai_reason: string; accepted: boolean; threshold: number;
   source_url: string; topic: string; title: string;
   contributor: string; evidence_snippet: string; settled_reward: string;
+  committed_reward: string; evidence_hash: string; evidence_len: number;
+  evidence_truncated: boolean; appeal_count: number;
 };
 
 // ---- reads (no wallet) — all through rpcRead: min-gap queue, TTL cache,
@@ -83,16 +85,19 @@ export async function readEntry(id: number) {
   return dec(r);
 }
 
-export async function readAccepted(topic: string, limit: number) {
-  const r = await rpcRead(`get_accepted_entries:${topic}:${limit}`, 10000, () =>
+export async function readAccepted(
+  topic: string, limit: number,
+  offset: number = 0
+): Promise<{ total: number; entries: (EntryCard & { source_url: string; contributor: string })[] }> {
+  const r = await rpcRead(`get_accepted_entries:${topic}:${offset}:${limit}`, 10000, () =>
     getReadClient().readContract({
       address: CONTRACT_ADDRESS as `0x${string}`,
       functionName: "get_accepted_entries",
-      args: [topic, limit],
+      args: [topic, offset, limit],
       transactionHashVariant: TransactionHashVariant.LATEST_FINAL,
     })
   );
-  return dec(r) as EntryCard[] & { summary: string; source_url: string; contributor: string }[];
+  return dec(r) as { total: number; entries: (EntryCard & { source_url: string; contributor: string })[] };
 }
 
 export async function readAll(offset: number, limit: number): Promise<{ total: number; entries: EntryCard[] }> {
@@ -109,19 +114,23 @@ export async function readAll(offset: number, limit: number): Promise<{ total: n
 
 export type PendingCard = { id: number; topic: string; title: string; source_url: string; contributor: string };
 
-export async function readPending(): Promise<PendingCard[]> {
-  const r = await rpcRead("get_pending_entries", 8000, () =>
+export async function readPending(offset: number = 0, limit: number = 20): Promise<{ total: number; entries: PendingCard[] }> {
+  const r = await rpcRead(`get_pending_entries:${offset}:${limit}`, 8000, () =>
     getReadClient().readContract({
       address: CONTRACT_ADDRESS as `0x${string}`,
       functionName: "get_pending_entries",
-      args: [],
+      args: [offset, limit],
       transactionHashVariant: TransactionHashVariant.LATEST_FINAL,
     })
   );
-  return dec(r) as PendingCard[];
+  return dec(r) as { total: number; entries: PendingCard[] };
 }
 
-export type Stats = { name: string; total_entries: number; topics: string[]; reward_amount: string };
+export type Stats = {
+  name: string; total_entries: number; topics: string[]; reward_amount: string;
+  pool_balance: string; reserved_balance: string; available_balance: string;
+  pending_count: number;
+};
 
 export async function readStats(): Promise<Stats> {
   const r = await rpcRead("get_stats", 5000, () =>
@@ -149,39 +158,47 @@ export async function readTopics(): Promise<string[]> {
 
 export type LeaderRow = { contributor: string; submitted: number; accepted: number };
 
-export async function readLeaderboard(limit: number): Promise<LeaderRow[]> {
-  const r = await rpcRead(`get_leaderboard:${limit}`, 15000, () =>
+export async function readLeaderboard(limit: number = 20, offset: number = 0): Promise<{ total: number; entries: LeaderRow[] }> {
+  const r = await rpcRead(`get_leaderboard:${offset}:${limit}`, 15000, () =>
     getReadClient().readContract({
       address: CONTRACT_ADDRESS as `0x${string}`,
       functionName: "get_leaderboard",
-      args: [limit],
+      args: [offset, limit],
       transactionHashVariant: TransactionHashVariant.LATEST_FINAL,
     })
   );
-  return dec(r) as LeaderRow[];
+  return dec(r) as { total: number; entries: LeaderRow[] };
 }
 
 // ---- writes (need wallet provider from popup, v1.1.8 API: no fee estimation) ----
-async function waitForLeaderExec(
+// Issue 6b: wait for TRUE finalization. leader_receipt.exec can be SUCCESS
+// within ~60s while consensus is still open (validators can still disagree).
+// The user-visible "done" signal must be statusName === FINALIZED (proven on
+// studionet: deploy tx reached FINALIZED with timestamp_awaiting_finalization).
+const FINAL_STATES = new Set(["FINALIZED", "REJECTED", "FAILED", "UNDETERMINED"]);
+async function waitForFinalized(
   // method syntax → bivariant params, matches SDK's branded Hash type
   client: { getTransaction(args: { hash: `0x${string}` }): Promise<unknown> },
   hash: `0x${string}`
 ): Promise<{ exec: string; statusName: string }> {
   let exec = "";
   let statusName = "";
-  // Adaptive cadence (ParaNusa polls at 15s): 3,3,4,6,8s then 10s — a write
-  // settles in ~40–90s on studionet, so this is ≤~10 RPCs instead of ~30.
-  const cadence = [3000, 3000, 4000, 6000, 8000];
-  for (let i = 0; i < 30; i++) {
+  // Adaptive cadence up to ~12 min total: 5s,5s,8s,10s,12s,15s then 20s.
+  // FINALIZED typically lands in 1–5 min on studionet; REJECTED/FAILED are
+  // terminal early-stops (no point burning the full budget).
+  const cadence = [5000, 5000, 8000, 10000, 12000, 15000];
+  for (let i = 0; i < 48; i++) {
     const tx = (await rpcGate(() => client.getTransaction({ hash }))) as {
       statusName?: string;
       consensus_data?: { leader_receipt?: { execution_result?: string }[] };
     };
     statusName = tx.statusName ?? "";
     exec = tx.consensus_data?.leader_receipt?.[0]?.execution_result ?? "";
-    if (exec) return { exec, statusName };
-    await new Promise((r) => setTimeout(r, cadence[i] ?? 10000));
+    if (FINAL_STATES.has(statusName)) return { exec, statusName };
+    await new Promise((r) => setTimeout(r, cadence[i] ?? 20000));
   }
+  // Budget exhausted — surface whatever partial state we have; the caller
+  // treats a non-FINALIZED status as ok=false so the UI never overclaims.
   return { exec, statusName };
 }
 
@@ -211,16 +228,17 @@ async function writeWithWallet(
       value: 0n,
     })
   )) as unknown as string;
-  // Poll getTransaction until the leader's execution result is known.
+  // Poll until FINALIZED (not just leader-exec): consensus can still flip
+  // after the leader succeeds. ok = FINALIZED && exec SUCCESS — never
+  // overclaim on a still-open consensus window.
   // Why not waitForTransactionReceipt: txExecutionResultName is never populated
-  // by getTransaction in genlayer-js 1.1.8, and FINALIZED can take >60s on
-  // studionet (default retries time out). consensus_data.leader_receipt is the
-  // same source the `genlayer receipt` CLI uses — proven by the studionet suite.
-  const leaderExec = await waitForLeaderExec(client, txId as `0x${string}`);
-  const ok = leaderExec.exec === "SUCCESS";
+  // by getTransaction in genlayer-js 1.1.8, and the SDK default retries time
+  // out before FINALIZED on studionet.
+  const finality = await waitForFinalized(client, txId as `0x${string}`);
+  const ok = finality.statusName === "FINALIZED" && finality.exec === "SUCCESS";
   // State may have changed — drop cached reads so pages refetch fresh data.
   rpcClear();
-  return { txId, ok, status: `${leaderExec.statusName}/${leaderExec.exec}` };
+  return { txId, ok, status: `${finality.statusName}/${finality.exec || "pending"}` };
 }
 
 export async function submitContributionLive(
@@ -234,6 +252,14 @@ export async function validateContributionLive(provider: unknown, walletAddress:
   return writeWithWallet(provider, walletAddress, "validate_contribution", [id]);
 }
 
-export async function cancelPendingLive(provider: unknown, walletAddress: string, id: number) {
-  return writeWithWallet(provider, walletAddress, "cancel_pending", [id]);
+export async function cancelPendingLive(provider: unknown, walletAddress: string, id: number, justification: string) {
+  return writeWithWallet(provider, walletAddress, "cancel_pending", [id, justification]);
+}
+
+export async function appealCancellationLive(provider: unknown, walletAddress: string, id: number, reason: string) {
+  return writeWithWallet(provider, walletAddress, "appeal_cancellation", [id, reason]);
+}
+
+export async function withdrawLive(provider: unknown, walletAddress: string, amountWei: string, to: string) {
+  return writeWithWallet(provider, walletAddress, "withdraw", [amountWei, to]);
 }

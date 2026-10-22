@@ -1,61 +1,36 @@
-import json
 import pytest
 
+from _mocks import (
+    GOOD_URL, GOOD_URL_2, SPAM_URL, GOOD_PAGE, SPAM_PAGE,
+    accept_llm, reject_llm, mock_good_web, mock_good_llm,
+)
+
 CONTRACT = "contracts/veritasphere.py"
-GOOD_URL = "https://en.wikipedia.org/wiki/Bitcoin"
-GOOD_URL_2 = "https://docs.genlayer.com/developers/intelligent-contracts/ideas"
-SPAM_URL = "https://spam-farm-xyz.example/free-money"
 
-GOOD_PAGE = "Bitcoin is a decentralized digital currency. It was invented in 2008 by Satoshi Nakamoto. Transactions are verified by network nodes through cryptography."
-SPAM_PAGE = "FREE MONEY CLICK HERE jackpot casino bonus!!!"
-
-ACCEPT_LLM = json.dumps({
-    "summary": "Bitcoin is a decentralized digital currency invented in 2008 by Satoshi Nakamoto, with transactions verified by network nodes.",
-    "score": 9,
-    "is_relevant": True,
-    "reason": "reputable source, faithful summary, novel fact"
-})
-
-REJECT_LLM = json.dumps({
-    "summary": "Free money click here jackpot bonus casino.",
-    "score": 2,
-    "is_relevant": False,
-    "reason": "spam source, no verifiable facts"
-})
-
-
-def _deploy_with_owner(direct_vm, direct_deploy, owner, reward=0):
-    contract = direct_deploy(CONTRACT, args=[reward])
-    # direct_deploy uses current sender as deployer; ensure owner is sender
-    return contract
+DRAFT = "Bitcoin is a decentralized currency invented by Satoshi, need validation here for test."
 
 
 def test_submit_and_read(direct_vm, direct_deploy, direct_alice):
     direct_vm.sender = direct_alice
     contract = direct_deploy(CONTRACT, 0)
 
-    eid = contract.submit_contribution(
-        "crypto",
-        "What is Bitcoin?",
-        GOOD_URL,
-        "Bitcoin is a decentralized currency invented by Satoshi, need validation here for test.",
-    )
+    eid = contract.submit_contribution("crypto", "What is Bitcoin?", GOOD_URL, DRAFT)
     assert int(eid) == 1
 
     entry = contract.get_entry(1)
     assert entry["topic"] == "crypto"
     assert entry["status"] == "PENDING"
     assert entry["source_url"] == GOOD_URL
+    assert entry["committed_reward"] == "0"
 
-    # frontend reads must work pre-validation
     v = contract.get_validation_result(1)
     assert v["status"] == "PENDING"
     assert v["accepted"] is False
     assert v["threshold"] == 7
 
-    pending = contract.get_pending_entries()
-    assert len(pending) == 1
-    assert pending[0]["id"] == 1
+    pending = contract.get_pending_entries(0, 20)
+    assert pending["total"] == 1
+    assert pending["entries"][0]["id"] == 1
 
     topics = contract.get_topics()
     assert "crypto" in topics
@@ -63,6 +38,10 @@ def test_submit_and_read(direct_vm, direct_deploy, direct_alice):
     stats = contract.get_stats()
     assert stats["total_entries"] == 1
     assert stats["name"] == "Veritasphere"
+    assert stats["pending_count"] == 1
+    assert stats["pool_balance"] == "0"
+    assert stats["reserved_balance"] == "0"
+    assert stats["available_balance"] == "0"
 
 
 def test_duplicate_and_bad_url_rejected(direct_vm, direct_deploy, direct_alice):
@@ -74,8 +53,12 @@ def test_duplicate_and_bad_url_rejected(direct_vm, direct_deploy, direct_alice):
     with direct_vm.expect_revert("already submitted"):
         contract.submit_contribution("ai", "Duplicate", GOOD_URL_2, "Another long enough summary that should still be rejected as duplicate source.")
 
-    with direct_vm.expect_revert("must start with http"):
+    # steward: HTTPS-only sources
+    with direct_vm.expect_revert("must start with https://"):
         contract.submit_contribution("ai", "Bad", "ftp://bad-url", "Long enough summary to pass length check but bad url scheme.")
+
+    with direct_vm.expect_revert("must start with https://"):
+        contract.submit_contribution("ai", "PlainHttp", "http://example.com/x", "Long enough summary to pass length check but plain http scheme.")
 
     with direct_vm.expect_revert("min 20 chars"):
         contract.submit_contribution("ai", "Short", GOOD_URL, "too short")
@@ -87,8 +70,8 @@ def test_validate_accept_good_source(direct_vm, direct_deploy, direct_alice):
 
     contract.submit_contribution("crypto", "Bitcoin", GOOD_URL, "Contributor draft about bitcoin long enough for submission gate.")
 
-    direct_vm.mock_web(r".*wikipedia\.org/wiki/Bitcoin.*", {"status": 200, "body": GOOD_PAGE})
-    direct_vm.mock_llm(r".*Veritasphere truth validator.*", ACCEPT_LLM)
+    mock_good_web(direct_vm)
+    mock_good_llm(direct_vm)
 
     result = contract.validate_contribution(1)
     assert "ACCEPTED" in str(result)
@@ -97,18 +80,25 @@ def test_validate_accept_good_source(direct_vm, direct_deploy, direct_alice):
     assert entry["status"] == "ACCEPTED"
     assert entry["score"] == 9
     assert len(entry["summary"]) >= 20
+    # steward: verifiable evidence commitment recorded at settlement
+    assert entry["evidence_hash"].startswith("0x")
+    assert entry["evidence_len"] > 400
+    assert entry["evidence_truncated"] is False
 
     v = contract.get_validation_result(1)
     assert v["accepted"] is True
     assert v["ai_score"] == 9
 
-    acc = contract.get_accepted_entries("crypto", 10)
-    assert len(acc) == 1
-    assert acc[0]["id"] == 1
+    acc = contract.get_accepted_entries("crypto", 0, 10)
+    assert acc["total"] == 1
+    assert acc["entries"][0]["id"] == 1
 
-    lb = contract.get_leaderboard(10)
-    assert lb[0]["accepted"] == 1
-    assert lb[0]["submitted"] == 1
+    lb = contract.get_leaderboard(0, 10)
+    assert lb["entries"][0]["accepted"] == 1
+    assert lb["entries"][0]["submitted"] == 1
+
+    # pending registry must be empty after settlement
+    assert contract.get_pending_entries(0, 20)["total"] == 0
 
 
 def test_validate_reject_spam_source(direct_vm, direct_deploy, direct_alice):
@@ -118,7 +108,7 @@ def test_validate_reject_spam_source(direct_vm, direct_deploy, direct_alice):
     contract.submit_contribution("crypto", "Free money", SPAM_URL, "Contributor claims free money jackpot here, long enough draft text.")
 
     direct_vm.mock_web(r".*spam-farm-xyz.*", {"status": 200, "body": SPAM_PAGE})
-    direct_vm.mock_llm(r".*Veritasphere truth validator.*", REJECT_LLM)
+    direct_vm.mock_llm(r".*Veritasphere truth validator.*", reject_llm())
 
     result = contract.validate_contribution(1)
     assert "REJECTED" in str(result)
@@ -127,8 +117,8 @@ def test_validate_reject_spam_source(direct_vm, direct_deploy, direct_alice):
     assert entry["status"] == "REJECTED"
 
     # rejected must not appear in accepted list, still gone from pending
-    assert contract.get_accepted_entries("", 10) == []
-    assert contract.get_pending_entries() == []
+    assert contract.get_accepted_entries("", 0, 10) == {"total": 0, "entries": []}
+    assert contract.get_pending_entries(0, 20) == {"total": 0, "entries": []}
 
 
 def test_double_validate_rejected(direct_vm, direct_deploy, direct_alice):
@@ -136,8 +126,8 @@ def test_double_validate_rejected(direct_vm, direct_deploy, direct_alice):
     contract = direct_deploy(CONTRACT, 0)
     contract.submit_contribution("ai", "Topic", GOOD_URL, "Long enough contributor draft summary for double validate test.")
 
-    direct_vm.mock_web(r".*wikipedia.*", {"status": 200, "body": GOOD_PAGE})
-    direct_vm.mock_llm(r".*Veritasphere.*", ACCEPT_LLM)
+    mock_good_web(direct_vm)
+    mock_good_llm(direct_vm)
     contract.validate_contribution(1)
 
     with direct_vm.expect_revert("already"):
@@ -161,10 +151,14 @@ def test_frontend_pagination_and_leaderboard(direct_vm, direct_deploy, direct_al
     assert len(page1["entries"]) == 1
     assert page1["entries"][0]["id"] == 1
 
-    lb = contract.get_leaderboard(10)
-    assert len(lb) == 2
-    # both submitted 1, accepted 0 -> order stable
-    assert sum(r["submitted"] for r in lb) == 2
+    lb = contract.get_leaderboard(0, 10)
+    assert lb["total"] == 2
+    assert len(lb["entries"]) == 2
+    assert sum(r["submitted"] for r in lb["entries"]) == 2
+
+    by_topic = contract.get_entries_by_topic("ai", 0, 10)
+    assert by_topic["total"] == 2
+    assert len(by_topic["entries"]) == 2
 
 
 def test_access_control(direct_vm, direct_deploy, direct_alice, direct_bob):
@@ -188,8 +182,8 @@ def test_llm_resilience_short_summary(direct_vm, direct_deploy, direct_alice):
     contract = direct_deploy(CONTRACT, 0)
     contract.submit_contribution("ai", "T", GOOD_URL, "Long enough draft summary for resilience test case here.")
 
-    direct_vm.mock_web(r".*wikipedia.*", {"status": 200, "body": GOOD_PAGE})
-    bad_llm = json.dumps({"summary": "x", "score": 9, "is_relevant": True, "reason": "too short"})
+    mock_good_web(direct_vm)
+    bad_llm = accept_llm(summary="x")
     direct_vm.mock_llm(r".*Veritasphere.*", bad_llm)
 
     with direct_vm.expect_revert("too short"):

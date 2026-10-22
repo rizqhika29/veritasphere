@@ -16,7 +16,7 @@ export default function Leaderboard() {
     if (!CONFIGURED) { setLoaded(true); return; }
     try {
       const lb = await readLeaderboard(20);
-      setRows(lb);
+      setRows(lb.entries);
       setLive(true);
       setErr("");
     } catch (e) { setErr((e as Error).message); }

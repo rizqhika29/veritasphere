@@ -5,7 +5,7 @@
 // deploy values so a missing/empty dashboard var can never ship an unconfigured
 // build (steward finding: "CONTRACT NOT CONFIGURED" after deploy).
 const FALLBACKS = {
-  NEXT_PUBLIC_CONTRACT_ADDRESS: "0x8E4E6168028BCaCDB9a885Be4B014380371A3b0A",
+  NEXT_PUBLIC_CONTRACT_ADDRESS: "0x2C15F9E7822Aa78c6940Dd4abC246b86849dEC8A",
   NEXT_PUBLIC_RPC_URL: "https://studio.genlayer.com/api",
   NEXT_PUBLIC_CHAIN: "studionet",
 };
